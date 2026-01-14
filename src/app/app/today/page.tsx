@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ALLOWLIST } from "../allowlist";
+import { laLocalDayString } from "../lib/time";
 
 
 type Step = "pre" | "session" | "post" | "done";
@@ -35,6 +36,8 @@ export default function TodaySession() {
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [doneToday, setDoneToday] = useState<{ delta: number | null } | null>(null);
+  const [dayIndex, setDayIndex] = useState<number>(1);
 
   const blocks = useMemo(
     () => [
@@ -48,67 +51,114 @@ export default function TodaySession() {
     [variant]
   );
 
-useEffect(() => {
-  const init = async () => {
-    setErr("");
+  useEffect(() => {
+    const init = async () => {
+      setErr("");
 
-    const { data } = await supabase.auth.getSession();
-    const sess = data.session;
+      const { data } = await supabase.auth.getSession();
+      const sess = data.session;
 
-    if (!sess?.user?.id) {
-      router.replace("/login");
-      return;
-    }
+      if (!sess?.user?.id) {
+        router.replace("/login");
+        return;
+      }
 
-    // 🔒 INVITE-ONLY CHECK (ADD THIS BLOCK)
-    const email = sess.user.email?.toLowerCase() ?? "";
-    if (!ALLOWLIST.has(email)) {
-      await supabase.auth.signOut();
-      router.replace("/login");
-      return;
-    }
-    // 🔒 END INVITE-ONLY CHECK
+      // 🔒 INVITE-ONLY CHECK (ADD THIS BLOCK)
+      const email = sess.user.email?.toLowerCase() ?? "";
+      if (!ALLOWLIST.has(email)) {
+        await supabase.auth.signOut();
+        router.replace("/login");
+        return;
+      }
+      // 🔒 END INVITE-ONLY CHECK
 
-    setUserId(sess.user.id);
+      setUserId(sess.user.id);
 
-    const chosen = await chooseVariant(sess.user.id);
-    setVariant(chosen);
+      // Check if today's session is already completed
+      const today = localDayKey();
+      const { data: completedToday, error: eToday } = await supabase
+        .from("sessions")
+        .select("id, pre_score, post_score, delta, did_complete, created_at")
+        .eq("user_id", sess.user.id)
+        .eq("did_complete", true)
+        .order("created_at", { ascending: false })
+        .limit(20);
 
-    setLoading(false);
-  };
+      if (eToday) {
+        setErr(eToday.message);
+      } else {
+        const todaysCompleted = (completedToday ?? []).find((r) => {
+          const created = new Date(r.created_at as string);
+          return localDayKey(created) === today;
+        });
 
-  init();
-}, [router]);
+        if (todaysCompleted?.id) {
+          setDoneToday({ delta: (todaysCompleted.delta as number) ?? null });
+          setStep("done");
+          setLoading(false);
+          return;
+        }
+      }
+
+      const chosen = await chooseVariant(sess.user.id);
+      setVariant(chosen);
+
+      // Compute day index from completed sessions
+      const { data: completed, error: eComp } = await supabase
+        .from("sessions")
+        .select("id")
+        .eq("user_id", sess.user.id)
+        .eq("did_complete", true);
+
+      if (!eComp) {
+        const count = (completed ?? []).length;
+        setDayIndex(Math.min(count + 1, 7));
+      }
+
+      setLoading(false);
+    };
+
+    init();
+  }, [router]);
 
   async function chooseVariant(uid: string): Promise<Variant> {
-    const { data } = await supabase
+    // Get profile start day
+    const { data: prof } = await supabase
+      .from("profiles")
+      .select("first_completed_local_day")
+      .eq("user_id", uid)
+      .maybeSingle();
+
+    const today = laLocalDayString();
+
+    // If no start day yet, treat today as day 1 (they haven't completed anything)
+    const start = prof?.first_completed_local_day ?? today;
+
+    const dayIndex =
+      Math.floor((new Date(today).getTime() - new Date(start).getTime()) / (24 * 3600 * 1000)) + 1;
+
+    if (dayIndex <= 3) return "breath";
+    if (dayIndex <= 5) return "sound";
+
+    // Day 6+: choose best avg delta, requires >=3 completed sessions
+    const { data: completed } = await supabase
       .from("sessions")
-      .select("pre_score, post_score, practice_variant, did_complete")
+      .select("practice_variant, delta")
       .eq("user_id", uid)
       .eq("did_complete", true);
 
-    const completed = data ?? [];
-    if (completed.length < 3) {
-      // Days 1–3 breath, Days 4–7 sound (simple for pilot)
-      const dayNum = Math.min(completed.length + 1, 7);
-      return dayNum <= 3 ? "breath" : "sound";
-    }
-
-    const deltas = completed
-      .filter((r) => r.pre_score != null && r.post_score != null)
-      .map((r) => ({
-        v: r.practice_variant as Variant,
-        d: (r.post_score as number) - (r.pre_score as number),
-      }));
+    const rows = completed ?? [];
+    if (rows.length < 3) return "breath";
 
     const avg = (v: Variant) => {
-      const arr = deltas.filter((x) => x.v === v).map((x) => x.d);
-      if (arr.length === 0) return -999;
-      return arr.reduce((a, b) => a + b, 0) / arr.length;
+      const ds = rows.filter(r => r.practice_variant === v && r.delta != null).map(r => r.delta as number);
+      if (ds.length === 0) return -999;
+      return ds.reduce((a, b) => a + b, 0) / ds.length;
     };
 
     return avg("sound") > avg("breath") ? "sound" : "breath";
   }
+
 
   async function upsertTodaySession(preScore: number) {
     setErr("");
@@ -156,6 +206,7 @@ useEffect(() => {
         practice_variant: variant,
         pre_score: preScore,
         did_complete: false,
+        local_day: laLocalDayString(),
       })
       .select("id")
       .single();
@@ -168,15 +219,36 @@ useEffect(() => {
   async function finishSession(postScore: number) {
     setErr("");
     if (!sessionId) return;
-
+    const delta = postScore - (pre ?? 0);
     const { error } = await supabase
       .from("sessions")
       .update({
         post_score: postScore,
+        delta,
         did_complete: true,
       })
       .eq("id", sessionId)
       .eq("user_id", userId);
+    // After marking did_complete true:
+    const today = laLocalDayString();
+
+    await supabase.from("profiles").upsert({
+      user_id: userId,
+      // only set if null later via a separate fetch; simplest approach below:
+    }, { onConflict: "user_id" });
+
+    // Fetch profile to see if first day exists
+    const { data: prof } = await supabase
+      .from("profiles")
+      .select("first_completed_local_day")
+      .eq("user_id", userId)
+      .single();
+
+    if (!prof?.first_completed_local_day) {
+      await supabase.from("profiles").update({
+        first_completed_local_day: today,
+      }).eq("user_id", userId);
+    }
 
     if (error) throw error;
   }
@@ -194,7 +266,7 @@ useEffect(() => {
     <main style={{ maxWidth: 560, margin: "40px auto", padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <h1 style={{ margin: 0 }}>Today’s Session</h1>
+          <h1 style={{ margin: 0 }}>Today's Session</h1>
           <p style={{ marginTop: 6, opacity: 0.8 }}>Variant: {variant}</p>
         </div>
         <button onClick={signOut} style={{ height: 36 }}>
@@ -203,6 +275,13 @@ useEffect(() => {
       </div>
 
       {err && <p style={{ marginTop: 12, color: "crimson" }}>{err}</p>}
+
+      {dayMessage(dayIndex) && (
+        <div style={{ marginTop: 12, padding: 12, border: "1px solid #ddd", borderRadius: 12 }}>
+          <b>Day {dayIndex}</b>
+          <div style={{ marginTop: 6, opacity: 0.85 }}>{dayMessage(dayIndex)}</div>
+        </div>
+      )}
 
       {step === "pre" && (
         <>
@@ -213,6 +292,10 @@ useEffect(() => {
             style={{ width: "100%", padding: 12, marginTop: 12 }}
             disabled={pre == null}
             onClick={async () => {
+              if (doneToday) {
+                setStep("done");
+                return;
+              }
               try {
                 await upsertTodaySession(pre!);
                 setStep("session");
@@ -257,21 +340,29 @@ useEffect(() => {
 
       {step === "done" && (
         <>
-          <h2>Done</h2>
-          <p>
-            You’re <b>{delta}</b> points clearer than before.
-          </p>
-          <p style={{ opacity: 0.8 }}>Come back tomorrow for the next session.</p>
+          <h2>Done for today</h2>
+
+          {typeof delta === "number" && pre != null && post != null ? (
+            delta > 0 ? (
+              <p><b>You're {delta} points clearer than before.</b></p>
+            ) : (
+              <p><b>Not every day feels different. Showing up still counts.</b></p>
+            )
+          ) : doneToday?.delta != null ? (
+            doneToday.delta > 0 ? (
+              <p><b>You're {doneToday.delta} points clearer than before.</b></p>
+            ) : (
+              <p><b>Not every day feels different. Showing up still counts.</b></p>
+            )
+          ) : (
+            <p><b>Come back tomorrow for your next session.</b></p>
+          )}
 
           <button
             style={{ width: "100%", padding: 12, marginTop: 12 }}
-            onClick={() => {
-              setStep("pre");
-              setPre(null);
-              setPost(null);
-            }}
+            onClick={() => router.replace("/app/today")}
           >
-            Back to start
+            Done
           </button>
         </>
       )}
@@ -305,6 +396,13 @@ function ScorePicker({
       ))}
     </div>
   );
+}
+
+function dayMessage(dayIndex: number) {
+  if (dayIndex <= 1) return "Your 15-minute clarity reset starts now.";
+  if (dayIndex <= 3) return "Repetition > improvement. Just run the session again.";
+  if (dayIndex <= 5) return "Same structure. Slightly different input.";
+  return "";
 }
 
 function SessionTimer({
