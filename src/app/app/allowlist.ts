@@ -1,4 +1,4 @@
-export const ALLOWLIST = new Set<string>([
+export const COHORT_ALLOWLIST = new Set<string>([
   "abburi.nava@gmail.com",
   "user2@example.com",
   "user3@example.com",
@@ -10,3 +10,9 @@ export const ALLOWLIST = new Set<string>([
   "user9@example.com",
   "user10@example.com"
 ]);
+
+export const ADMIN_ALLOWLIST = new Set<string>([
+  "abburi.nava@gmail.com",
+]);
+
+export const ALLOWLIST = COHORT_ALLOWLIST;

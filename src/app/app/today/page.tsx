@@ -38,6 +38,12 @@ export default function TodaySession() {
   const [err, setErr] = useState("");
   const [doneToday, setDoneToday] = useState<{ delta: number | null } | null>(null);
   const [dayIndex, setDayIndex] = useState<number>(1);
+  const [completedCount, setCompletedCount] = useState<number>(0);
+  const [reflectionDone, setReflectionDone] = useState<boolean>(false);
+
+  const [rCompared, setRCompared] = useState<"more" | "same" | "less" | "">("");
+  const [rContinue, setRContinue] = useState<"yes" | "maybe" | "no" | "">("");
+  const [savingReflection, setSavingReflection] = useState(false);
 
   const blocks = useMemo(
     () => [
@@ -73,6 +79,29 @@ export default function TodaySession() {
       // 🔒 END INVITE-ONLY CHECK
 
       setUserId(sess.user.id);
+
+      // Count completed sessions (used for day index)
+      const { data: compRows } = await supabase
+        .from("sessions")
+        .select("id")
+        .eq("user_id", sess.user.id)
+        .eq("did_complete", true);
+
+      const count = (compRows ?? []).length;
+      setCompletedCount(count);
+
+      // If they are at/after Day 7, check if reflection already submitted today
+      if (count >= 7) {
+        const today = localDayKey();
+        const { data: ref } = await supabase
+          .from("reflections")
+          .select("id")
+          .eq("user_id", sess.user.id)
+          .eq("local_day", today)
+          .maybeSingle();
+
+        if (ref?.id) setReflectionDone(true);
+      }
 
       // Check if today's session is already completed
       const today = localDayKey();
@@ -250,6 +279,8 @@ export default function TodaySession() {
       }).eq("user_id", userId);
     }
 
+    setCompletedCount((c) => c + 1);
+
     if (error) throw error;
   }
 
@@ -364,6 +395,90 @@ export default function TodaySession() {
           >
             Done
           </button>
+
+          {(completedCount >= 7 && !reflectionDone) && (
+            <div style={{ marginTop: 18, padding: 12, border: "1px solid #ddd", borderRadius: 12 }}>
+              <h3 style={{ marginTop: 0 }}>Quick reflection</h3>
+
+              <div style={{ marginTop: 10 }}>
+                <div><b>1) Compared to Day 1:</b></div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                  {[
+                    { v: "more", label: "More clear" },
+                    { v: "same", label: "Same" },
+                    { v: "less", label: "Less clear" },
+                  ].map((opt) => (
+                    <button
+                      key={opt.v}
+                      onClick={() => setRCompared(opt.v as any)}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: 10,
+                        border: "1px solid #ccc",
+                        background: rCompared === opt.v ? "#eee" : "white",
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                <div><b>2) Would you continue if it stayed this simple?</b></div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                  {[
+                    { v: "yes", label: "Yes" },
+                    { v: "maybe", label: "Maybe" },
+                    { v: "no", label: "No" },
+                  ].map((opt) => (
+                    <button
+                      key={opt.v}
+                      onClick={() => setRContinue(opt.v as any)}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: 10,
+                        border: "1px solid #ccc",
+                        background: rContinue === opt.v ? "#eee" : "white",
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                style={{ width: "100%", padding: 12, marginTop: 14 }}
+                disabled={!rCompared || !rContinue || savingReflection}
+                onClick={async () => {
+                  try {
+                    setSavingReflection(true);
+                    setErr("");
+
+                    const today = localDayKey();
+
+                    const { error } = await supabase.from("reflections").insert({
+                      user_id: userId,
+                      local_day: today,
+                      compared_to_day1: rCompared,
+                      continue_simple: rContinue,
+                    });
+
+                    if (error) throw error;
+
+                    setReflectionDone(true);
+                  } catch (e: any) {
+                    setErr(e?.message ?? "Failed to save reflection.");
+                  } finally {
+                    setSavingReflection(false);
+                  }
+                }}
+              >
+                {savingReflection ? "Saving…" : "Submit reflection"}
+              </button>
+            </div>
+          )}
         </>
       )}
     </main>
