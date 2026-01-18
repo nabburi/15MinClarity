@@ -50,9 +50,23 @@ export default function TodaySession() {
       {
         label: variant === "breath" ? "Downshift (Breath)" : "Downshift (Sound)",
         seconds: 4 * 60,
+        prompt:
+          variant === "breath"
+            ? "Breathe slowly through your nose. Slightly longer exhale than inhale. Keep attention on the breath."
+            : "Let sounds come to you. Don't label or follow them. Just notice sound as sound.",
       },
-      { label: "Attention Stabilization", seconds: 6 * 60 },
-      { label: "Grounded Recall", seconds: 5 * 60 }, // total 15 min
+      {
+        label: "Steady Attention",
+        seconds: 6 * 60,
+        prompt:
+          "Choose a single anchor — breath, sound, or body sensation. When attention drifts, gently return.",
+      },
+      {
+        label: "Grounded Recall",
+        seconds: 4 * 60,
+        prompt:
+          "Recall a moment when you felt steady or clear. Not intense. Stay with the feeling, not the story.",
+      },
     ],
     [variant]
   );
@@ -524,7 +538,7 @@ function SessionTimer({
   blocks,
   onDone,
 }: {
-  blocks: { label: string; seconds: number }[];
+  blocks: { label: string; seconds: number; prompt: string }[];
   onDone: () => void;
 }) {
   const total = blocks.reduce((a, b) => a + b.seconds, 0);
@@ -551,9 +565,23 @@ function SessionTimer({
     return "Session";
   }, [blocks, t, total]);
 
+  const currentPrompt = useMemo(() => {
+    let elapsed = total - t;
+    for (const b of blocks) {
+      if (elapsed < b.seconds) return b.prompt;
+      elapsed -= b.seconds;
+    }
+    return "";
+  }, [blocks, t, total]);
+
   return (
     <div style={{ marginTop: 16 }}>
       <h2>{currentLabel}</h2>
+      {currentPrompt && (
+        <p style={{ marginTop: 8, fontStyle: "italic", opacity: 0.8 }}>
+          {currentPrompt}
+        </p>
+      )}
       <p style={{ fontSize: 36, margin: "12px 0" }}>
         {Math.floor(t / 60)}:{String(t % 60).padStart(2, "0")}
       </p>
