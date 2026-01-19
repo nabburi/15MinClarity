@@ -1,7 +1,7 @@
 export const COHORT_ALLOWLIST = new Set<string>([
   "abburi.nava@gmail.com",
   "Ytr.hdp@gmail.com",
-  "user3@example.com",
+  "Asiva2793@gmail.com",
   "user4@example.com",
   "user5@example.com",
   "user6@example.com",
