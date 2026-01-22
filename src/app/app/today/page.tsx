@@ -342,9 +342,11 @@ export default function TodaySession() {
                 return;
               }
               try {
-                playTransitionBeep(); // unlock audio + confirms start
+                // unlock audio + confirm start
+                playTransitionTone().then(() => {
+                  setStep("session");
+                });
                 await upsertTodaySession(pre!);
-                setStep("session");
               } catch (e: any) {
                 setErr(e?.message ?? "Something went wrong.");
               }
@@ -535,33 +537,47 @@ function dayMessage(dayIndex: number) {
   return "";
 }
 
-function playTransitionBeep() {
-  try {
-    const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
-    const ctx = new AudioCtx();
+function playTransitionTone(): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const AudioCtx =
+        window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioCtx();
 
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
 
-    osc.type = "sine";
-    osc.frequency.value = 528; // noticeable but not harsh
-    gain.gain.value = 0.0001;
+      osc.type = "sine";
+      osc.frequency.value = 528; // neutral, not musical
 
-    osc.connect(gain);
-    gain.connect(ctx.destination);
+      // start silent
+      gain.gain.value = 0.0001;
 
-    const now = ctx.currentTime;
-    // quick fade in/out so it's not clicky
-    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.30);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
 
-    osc.start(now);
-    osc.stop(now + 0.31);
+      const now = ctx.currentTime;
 
-    osc.onended = () => ctx.close();
-  } catch {
-    // ignore if audio fails
-  }
+      // fade in (first 0.3s)
+      gain.gain.exponentialRampToValueAtTime(0.15, now + 0.3);
+
+      // sustain
+      gain.gain.setValueAtTime(0.15, now + 2.6);
+
+      // fade out (last 0.4s)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 3.0);
+
+      osc.start(now);
+      osc.stop(now + 3.05);
+
+      osc.onended = () => {
+        ctx.close();
+        resolve();
+      };
+    } catch {
+      resolve(); // never block UX
+    }
+  });
 }
 
 function SessionTimer({
@@ -574,16 +590,21 @@ function SessionTimer({
   const total = blocks.reduce((a, b) => a + b.seconds, 0);
   const [t, setT] = useState(total);
   const [running, setRunning] = useState(true);
+  const [pausedForTransition, setPausedForTransition] = useState(false);
 
   // Track current block index and beep only on transitions
   const prevBlockIndexRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!running) return;
+    if (!running || pausedForTransition) return;
     if (t <= 0) return;
-    const id = setInterval(() => setT((x) => x - 1), 1000);
+
+    const id = setInterval(() => {
+      setT((x) => x - 1);
+    }, 1000);
+
     return () => clearInterval(id);
-  }, [running, t]);
+  }, [running, pausedForTransition, t]);
 
   useEffect(() => {
     if (t <= 0) onDone();
@@ -607,9 +628,15 @@ function SessionTimer({
   useEffect(() => {
     const prev = prevBlockIndexRef.current;
     if (blockIndex !== prev) {
-      // Transition happened
-      playTransitionBeep();
       prevBlockIndexRef.current = blockIndex;
+
+      // pause timer
+      setPausedForTransition(true);
+
+      // play tone, then resume
+      playTransitionTone().then(() => {
+        setPausedForTransition(false);
+      });
     }
   }, [blockIndex]);
 
@@ -620,6 +647,12 @@ function SessionTimer({
       {current.prompt && (
         <p style={{ opacity: 0.85, lineHeight: 1.5, marginTop: 8 }}>
           {current.prompt}
+        </p>
+      )}
+
+      {pausedForTransition && (
+        <p style={{ marginTop: 8, opacity: 0.6 }}>
+          Transitioning…
         </p>
       )}
 
