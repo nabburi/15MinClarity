@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { ALLOWLIST } from "../allowlist";
+import { COHORT_ALLOWLIST } from "../allowlist";
 import { laLocalDayString } from "../lib/time";
 
 
@@ -53,17 +53,17 @@ export default function TodaySession() {
         prompt:
           variant === "breath"
             ? "Breathe slowly through your nose. Slightly longer exhale than inhale. Keep attention on the breath."
-            : "Let sounds come to you. Don't label or follow them. Just notice sound as sound.",
+            : "Let sounds come to you. Don't label them. Don't follow them. Just notice sound as sound.",
       },
       {
         label: "Steady Attention",
         seconds: 6 * 60,
-        prompt:
-          "Choose a single anchor — breath, sound, or body sensation. When attention drifts, gently return.",
+        // 🔒 FIXED ANCHOR — DO NOT CHANGE
+        prompt: "Keep attention on the breath. When attention drifts, gently return.",
       },
       {
         label: "Grounded Recall",
-        seconds: 4 * 60,
+        seconds: 5 * 60,
         prompt:
           "Recall a moment when you felt steady or clear. Not intense. Stay with the feeling, not the story.",
       },
@@ -85,7 +85,7 @@ export default function TodaySession() {
 
       // 🔒 INVITE-ONLY CHECK (ADD THIS BLOCK)
       const email = sess.user.email?.toLowerCase() ?? "";
-      if (!ALLOWLIST.has(email)) {
+      if (!COHORT_ALLOWLIST.has(email)) {
         await supabase.auth.signOut();
         router.replace("/login");
         return;
@@ -342,6 +342,7 @@ export default function TodaySession() {
                 return;
               }
               try {
+                playTransitionBeep(); // unlock audio + confirms start
                 await upsertTodaySession(pre!);
                 setStep("session");
               } catch (e: any) {
@@ -534,16 +535,48 @@ function dayMessage(dayIndex: number) {
   return "";
 }
 
+function playTransitionBeep() {
+  try {
+    const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
+    const ctx = new AudioCtx();
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.value = 528; // noticeable but not harsh
+    gain.gain.value = 0.0001;
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    // quick fade in/out so it's not clicky
+    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.30);
+
+    osc.start(now);
+    osc.stop(now + 0.31);
+
+    osc.onended = () => ctx.close();
+  } catch {
+    // ignore if audio fails
+  }
+}
+
 function SessionTimer({
   blocks,
   onDone,
 }: {
-  blocks: { label: string; seconds: number; prompt: string }[];
+  blocks: { label: string; seconds: number; prompt?: string }[];
   onDone: () => void;
 }) {
   const total = blocks.reduce((a, b) => a + b.seconds, 0);
   const [t, setT] = useState(total);
   const [running, setRunning] = useState(true);
+
+  // Track current block index and beep only on transitions
+  const prevBlockIndexRef = useRef<number>(0);
 
   useEffect(() => {
     if (!running) return;
@@ -556,42 +589,52 @@ function SessionTimer({
     if (t <= 0) onDone();
   }, [t, onDone]);
 
-  const currentLabel = useMemo(() => {
-    let elapsed = total - t;
-    for (const b of blocks) {
-      if (elapsed < b.seconds) return b.label;
-      elapsed -= b.seconds;
-    }
-    return "Session";
-  }, [blocks, t, total]);
+  const elapsed = total - t;
 
-  const currentPrompt = useMemo(() => {
-    let elapsed = total - t;
-    for (const b of blocks) {
-      if (elapsed < b.seconds) return b.prompt;
-      elapsed -= b.seconds;
+  // Determine current block index by elapsed time
+  const blockIndex = useMemo(() => {
+    let acc = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      acc += blocks[i].seconds;
+      if (elapsed < acc) return i;
     }
-    return "";
-  }, [blocks, t, total]);
+    return blocks.length - 1;
+  }, [blocks, elapsed]);
+
+  const current = blocks[blockIndex] ?? { label: "Session", seconds: total };
+
+  // Beep when block changes (but not at start)
+  useEffect(() => {
+    const prev = prevBlockIndexRef.current;
+    if (blockIndex !== prev) {
+      // Transition happened
+      playTransitionBeep();
+      prevBlockIndexRef.current = blockIndex;
+    }
+  }, [blockIndex]);
 
   return (
     <div style={{ marginTop: 16 }}>
-      <h2>{currentLabel}</h2>
-      {currentPrompt && (
-        <p style={{ marginTop: 8, fontStyle: "italic", opacity: 0.8 }}>
-          {currentPrompt}
+      <h2>{current.label}</h2>
+
+      {current.prompt && (
+        <p style={{ opacity: 0.85, lineHeight: 1.5, marginTop: 8 }}>
+          {current.prompt}
         </p>
       )}
-      <p style={{ fontSize: 36, margin: "12px 0" }}>
+
+      <p style={{ fontSize: 32, margin: "12px 0" }}>
         {Math.floor(t / 60)}:{String(t % 60).padStart(2, "0")}
       </p>
 
       <div style={{ display: "flex", gap: 10 }}>
-        <button onClick={() => setRunning((r) => !r)} style={{ padding: 10 }}>
+        <button onClick={() => setRunning(!running)} style={{ padding: 10 }}>
           {running ? "Pause" : "Resume"}
         </button>
+
         <button
           onClick={() => {
+            prevBlockIndexRef.current = 0;
             setT(total);
             setRunning(true);
           }}
